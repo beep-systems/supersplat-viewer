@@ -1,11 +1,17 @@
-import { Color, DEVICETYPE_WEBGL2, Quat, Vec3, XrManager } from 'playcanvas';
+import { DEVICETYPE_WEBGL2, math, Quat, Vec3, XrManager } from 'playcanvas';
 import type { Entity } from 'playcanvas';
 import { XrControllers } from 'playcanvas/scripts/esm/xr/xr-controllers.mjs';
+import { XrManipulation } from 'playcanvas/scripts/esm/xr/xr-manipulation.mjs';
 import { XrNavigation } from 'playcanvas/scripts/esm/xr/xr-navigation.mjs';
 
 import type { Global, XrMode } from './types';
 
-// On entering/exiting AR, we need to set the camera clear color to transparent black
+// Standalone headsets run XR on a mobile gpu, which draws every splat once per eye, but their
+// browsers report a desktop platform. Their sessions render with fixed foveation and a 72 Hz
+// target, at 0.8x resolution in performance mode, and the viewer lowers the splat budget.
+const standaloneHeadset = /OculusBrowser|PicoBrowser/.test(globalThis.navigator?.userAgent ?? '');
+
+// The viewer reconfigures the camera (clear color, post effects) when state.xrMode changes
 const initXr = (global: Global) => {
     const { app, events, state, camera, renderer, root } = global;
     const { xr } = app;
@@ -47,17 +53,20 @@ const initXr = (global: Global) => {
     }
 
     const parent = camera.parent as Entity;
-    const clearColor = new Color();
 
     const parentPosition = new Vec3();
     const parentRotation = new Quat();
     const cameraPosition = new Vec3();
     const cameraRotation = new Quat();
-    const angles = new Vec3();
 
     parent.addComponent('script');
     parent.script.create(XrControllers);
     parent.script.create(XrNavigation);
+
+    // Grabbing with both hands drags, turns and scales the scene. Created once the splat entity
+    // it moves has loaded, which is before XR can start, and put back when the session ends, as
+    // the viewer's camera, collision and annotations assume the authored placement.
+    let manipulation: XrManipulation | null = null;
 
     const started = xr.on('start', () => {
         if (destroyed) return;
@@ -69,16 +78,31 @@ const initXr = (global: Global) => {
         cameraPosition.copy(camera.getPosition());
         cameraRotation.copy(camera.getRotation());
 
-        cameraRotation.getEulerAngles(angles);
-
-        // copy transform to parent to XR/VR mode starts in the right place
-        parent.setPosition(cameraPosition.x, 0, cameraPosition.z);
-        parent.setEulerAngles(0, angles.y, 0);
-
-        if (xr.type === 'immersive-ar') {
-            clearColor.copy(camera.camera.clearColor);
-            camera.camera.clearColor = new Color(0, 0, 0, 0);
+        // Start the session where the camera is, facing its heading with pitch and roll reset:
+        // where it looks across the ground, or where the top of its view points when it looks
+        // straight up or down. The yaw of getEulerAngles() only covers -90 to 90 degrees, so a
+        // camera facing further round would start the session facing the wrong way.
+        const { forward } = camera;
+        let x = forward.x;
+        let z = forward.z;
+        if (x * x + z * z < 1e-6) {
+            const { up } = camera;
+            const sign = forward.y < 0 ? 1 : -1;
+            x = up.x * sign;
+            z = up.z * sign;
         }
+        parent.setPosition(cameraPosition.x, 0, cameraPosition.z);
+        parent.setEulerAngles(0, Math.atan2(-x, -z) * math.RAD_TO_DEG, 0);
+
+        if (standaloneHeadset) {
+            xr.fixedFoveation = 1;
+            if (xr.supportedFrameRates?.includes(72)) xr.updateTargetFrameRate(72);
+        }
+
+        // AR scales about the hands, for content brought to a tabletop; VR about the feet, so
+        // the user stays standing on the scene
+        if (manipulation) manipulation.scalePivot = xr.type === 'immersive-ar' ? 'hands' : 'feet';
+
         state.xrMode = xr.type === 'immersive-ar' ? 'ar' : 'vr';
     });
 
@@ -91,10 +115,8 @@ const initXr = (global: Global) => {
         parent.setRotation(parentRotation);
         camera.setPosition(cameraPosition);
         camera.setRotation(cameraRotation);
+        manipulation?.reset();
 
-        if (state.xrMode === 'ar') {
-            camera.camera.clearColor = clearColor;
-        }
         state.xrMode = null;
 
         // Restore the canvas to the correct position in the DOM after exiting XR. In
@@ -127,6 +149,7 @@ const initXr = (global: Global) => {
             await new Promise<void>((resolve, reject) => {
                 rejectStart = reject;
                 xr.start(camera.camera, type, 'local-floor', {
+                    framebufferScaleFactor: standaloneHeadset && state.performanceMode ? 0.8 : 1,
                     callback: (error) => {
                         if (destroyed) {
                             // Browser session requests cannot be cancelled. Close a late result.
@@ -188,6 +211,11 @@ const initXr = (global: Global) => {
     return {
         start,
         end,
+        setManipulationTarget: (entity: Entity) => {
+            manipulation = parent.script.create(XrManipulation, {
+                properties: { target: entity }
+            }) as unknown as XrManipulation;
+        },
         destroy: () => {
             destroyed = true;
             availability.off();
@@ -202,4 +230,4 @@ const initXr = (global: Global) => {
     };
 };
 
-export { initXr };
+export { initXr, standaloneHeadset };

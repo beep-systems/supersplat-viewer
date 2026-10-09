@@ -18,9 +18,9 @@ import {
     Vec3,
     GSPLAT_DEBUG_LOD,
     GSPLAT_DEBUG_NONE,
-    GSPLAT_LODMODE_DISTANCE,
     GSPLAT_RENDERER_RASTER_CPU_SORT,
     GSPLAT_RENDERER_RASTER_GPU_SORT,
+    LAYERID_SKYBOX,
     platform
 } from 'playcanvas';
 import type { CameraComponent, Entity, GraphicsDevice, GSplatComponent, Layer } from 'playcanvas';
@@ -46,7 +46,7 @@ import type { ExperienceSettings, PostEffectSettings } from './settings';
 import type { CaptureOptions, Config, Global, XrMode } from './types';
 import type { FrameOptions } from './voluscape-types';
 import { VoxelDebugOverlay } from './voxel-debug-overlay';
-import { initXr } from './xr';
+import { initXr, standaloneHeadset } from './xr';
 
 // String.replace wrapper that warns when the source substring is missing, so
 // shader chunk patches against the engine fail loudly instead of silently
@@ -88,6 +88,18 @@ const budgets = {
         high: 4
     }
 };
+
+// budget while an XR session runs on a standalone headset, millions of splats. On a Quest 3,
+// 1M splats render at about 30 fps (40 at 0.8x resolution), against 10 fps at the 4M desktop
+// budget it otherwise gets
+const standaloneXrBudget = 1;
+
+// how much further away parts of the scene behind the camera count when choosing their detail,
+// which saves a lot of splats while orbiting, and the turn after which detail is chosen again.
+// XR sessions choose detail by distance alone, with no penalty and no turn-triggered choices: a
+// head turning less than 90 degrees brought the coarse detail chosen for behind it into view
+const lodBehindPenalty = 5;
+const lodUpdateAngle = 90;
 
 type GSplatOctreeResourceLike = {
     octree?: {
@@ -335,18 +347,14 @@ class Viewer {
         }
 
         // reconfigure camera when entering/exiting XR. The stochastic renderer has no stereo
-        // path yet, so the engine's renderer draws the splats for the session
-        const configureXrCamera = () => {
+        // path yet, so the engine's renderer draws the splats for the session. Follows xrMode
+        // rather than app.xr.active, which still reports the session while its 'end' handlers run
+        const xrModeChanged = events.on('xrMode:changed', () => {
             if (this.destroyed) return;
             this.configureCamera(settings);
-            this.splatRenderer?.setEnabled(!app.xr.active);
-        };
-        const xrStart = app.xr.on('start', configureXrCamera);
-        const xrEnd = app.xr.on('end', configureXrCamera);
-        this.onDestroy(() => {
-            xrStart.off();
-            xrEnd.off();
+            this.splatRenderer?.setEnabled(state.xrMode === null);
         });
+        this.onDestroy(() => xrModeChanged.off());
 
         // debug ministats, from the flag at start and the debug panel's toggle after
         this.setMiniStats(config.ministats);
@@ -489,9 +497,8 @@ class Viewer {
         // which nodes that first pass pulls in.
 
         // these two allow LOD behind camera to drop, saves lots of splats
-        gsplat.lodUpdateAngle = 90;
-        gsplat.lodBehindPenalty = 5;
-        gsplat.lodMode = GSPLAT_LODMODE_DISTANCE;
+        gsplat.lodUpdateAngle = lodUpdateAngle;
+        gsplat.lodBehindPenalty = lodBehindPenalty;
         gsplat.minContribution = 1;
         gsplat.alphaClip = 1 / 255;
         gsplat.antiAlias = config.aa;
@@ -594,6 +601,8 @@ class Viewer {
 
             const gsplatComponent = results[0].gsplat as GSplatComponent;
 
+            this.xr.setManipulationTarget(results[0]);
+
             // get scene bounding box
             refreshSceneBounds();
 
@@ -668,12 +677,17 @@ class Viewer {
                     if (config.budget !== undefined && Number.isFinite(config.budget) && config.budget > 0) {
                         return config.budget;
                     }
+                    if (standaloneHeadset && state.xrMode !== null) {
+                        return standaloneXrBudget;
+                    }
                     const quality = platform.mobile ? budgets.mobile : budgets.desktop;
                     return state.performanceMode ? quality.low : quality.high;
                 };
 
                 gsplat.splatBudget = budget() * 1000000;
                 gsplat.colorUpdateAngle = state.performanceMode ? 1 : 0.2;
+                gsplat.lodBehindPenalty = state.xrMode === null ? lodBehindPenalty : 1;
+                gsplat.lodUpdateAngle = state.xrMode === null ? lodUpdateAngle : 0;
                 gsplatComponent.lodRangeMin = 0;
                 gsplatComponent.lodRangeMax = 1000;
 
@@ -727,6 +741,7 @@ class Viewer {
 
                     // handle quality mode changes
                     events.on('performanceMode:changed', applyPerfSettings);
+                    events.on('xrMode:changed', applyPerfSettings);
                     applyPerfSettings();
 
                     // the stochastic renderer consumes the engine's world under whatever
@@ -1036,7 +1051,7 @@ class Viewer {
     // configure camera based on application mode and post process settings
     configureCamera(settings: ExperienceSettings) {
         const { global } = this;
-        const { app, config, camera } = global;
+        const { app, config, camera, state } = global;
         const { postEffectSettings } = settings;
         const { background } = settings;
 
@@ -1045,7 +1060,8 @@ class Viewer {
 
         const postFxRequested = !config.nofx && (anyPostEffectEnabled(postEffectSettings) || highPrecisionRendering);
 
-        const enableCameraFrame = !app.xr.active && postFxRequested;
+        // CameraFrame has no XR path, so post effects are off for the session
+        const enableCameraFrame = state.xrMode === null && postFxRequested;
 
         if (enableCameraFrame) {
             // create instance
@@ -1107,11 +1123,15 @@ class Viewer {
             // restore original isColorBufferSrgb behavior
             setBackBufferSrgb(app.graphicsDevice, false);
 
-            if (!app.xr.active) {
-                camera.camera.toneMapping = tonemapTable[settings.tonemapping];
-                camera.camera.clearColor = new Color(background.color);
-            }
+            camera.camera.toneMapping = tonemapTable[settings.tonemapping];
+
+            // AR composites the scene over the passthrough view
+            camera.camera.clearColor = state.xrMode === 'ar' ? new Color(0, 0, 0, 0) : new Color(background.color);
         }
+
+        // the sky would cover AR's passthrough view entirely, so it is hidden for the session
+        const skyLayer = app.scene.layers.getLayerById(LAYERID_SKYBOX);
+        if (skyLayer) skyLayer.enabled = state.xrMode !== 'ar';
 
         // Mesh overlay bakes its vertex colors based on the current gamma
         // path; reapply when CameraFrame is created/destroyed (e.g. on XR
