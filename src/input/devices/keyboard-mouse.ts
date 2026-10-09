@@ -193,7 +193,8 @@ class KeyboardMouseDevice implements InputDevice {
 
         // rotate (mouse-drag, masked when in pan mode)
         v.set(0, 0, 0);
-        mouseRotate.set(mouse[0], mouse[1], 0);
+        const mouseDragSign = mode === 'fly' && (this._buttons[0] || button[0] === -1) ? -1 : 1;
+        mouseRotate.set(mouse[0] * mouseDragSign, mouse[1] * mouseDragSign, 0);
         v.add(
             mouseRotate.mulScalar(
                 (1 - pan) * this.orbitSpeed * orbitFactor * this.mouseRotateSensitivity * DISPLACEMENT_SCALE

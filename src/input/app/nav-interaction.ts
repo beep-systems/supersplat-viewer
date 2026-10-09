@@ -57,6 +57,28 @@ class NavInteraction {
 
     private _lastTap = { time: 0, x: 0, y: 0 };
 
+    _pointHandlerAtDown: Global['pointInteraction'] = null;
+    _markerTouches = new Map<number, number[]>();
+    _markerMaxTouches = 0;
+    _markerTouchDelta = 0;
+    _onInteractionChanged = () => {
+        this._targetPickRequest++;
+        this._mouseClickTracking = false;
+        this._suppressClick = false;
+        this._lastTap.time = 0;
+        this._pointHandlerAtDown = null;
+        this._markerTouches.clear();
+        this._updateCursor();
+    };
+    _dispatchPointInteraction() {
+        const handler = this._global?.pointInteraction;
+        if (handler && handler === this._pointHandlerAtDown && this._canvas) {
+            handler(
+                this._lastPointerOffsetX / this._canvas.clientWidth,
+                this._lastPointerOffsetY / this._canvas.clientHeight
+            );
+        }
+    }
     constructor(picker: ScenePicker) {
         this._picker = picker;
     }
@@ -66,6 +88,10 @@ class NavInteraction {
         const canvas = this._canvas;
         if (!global || !canvas) return;
         const { state } = global;
+        if (global.pointInteraction) {
+            canvas.style.cursor = global.pointCursor ?? 'crosshair';
+            return;
+        }
         const canClickTarget =
             state.inputMode === 'desktop' &&
             ((state.cameraMode === 'walk' && !state.gamingControls) ||
@@ -170,6 +196,18 @@ class NavInteraction {
             this._updateCursor();
         }
 
+        this._pointHandlerAtDown = global.pointInteraction ?? null;
+        if (global.pointInteraction) {
+            if (event.pointerType === 'touch') {
+                if (!this._markerTouches.size) {
+                    this._markerMaxTouches = 0;
+                    this._markerTouchDelta = 0;
+                }
+                this._markerTouches.set(event.pointerId, [event.clientX, event.clientY]);
+                this._markerMaxTouches = Math.max(this._markerMaxTouches, this._markerTouches.size);
+            }
+            return;
+        }
         // Manual double-click/tap detection for platforms that do not emit
         // reliable native dblclick events on the canvas.
         const now = Date.now();
@@ -193,6 +231,12 @@ class NavInteraction {
         const global = this._global;
         if (!global) return;
         const { state, events } = global;
+        const touch = this._markerTouches.get(event.pointerId);
+        if (touch) {
+            this._markerTouchDelta += Math.abs(event.clientX - touch[0]) + Math.abs(event.clientY - touch[1]);
+            touch[0] = event.clientX;
+            touch[1] = event.clientY;
+        }
 
         if (this._mouseClickTracking && event.pointerType !== 'touch') {
             const prev = this._mouseClickDelta;
@@ -209,6 +253,13 @@ class NavInteraction {
         const global = this._global;
         if (!global) return;
         const { state, events } = global;
+        if (global.pointInteraction && event.pointerType === 'touch' && this._markerTouches.has(event.pointerId)) {
+            this._markerTouches.delete(event.pointerId);
+            if (!this._markerTouches.size && this._markerMaxTouches === 1 && this._markerTouchDelta < TAP_EPSILON) {
+                this._dispatchPointInteraction();
+            }
+            return;
+        }
 
         if (this._mouseClickTracking && event.pointerType !== 'touch' && event.button === 0) {
             this._mouseClickTracking = false;
@@ -218,6 +269,10 @@ class NavInteraction {
                 return;
             }
             if (this._mouseClickDelta < TAP_EPSILON) {
+                if (global.pointInteraction) {
+                    this._dispatchPointInteraction();
+                    return;
+                }
                 if (state.cameraMode === 'walk' && !state.gamingControls) {
                     const result = this._pickCollision(this._lastPointerOffsetX, this._lastPointerOffsetY);
                     if (result) {
@@ -237,7 +292,7 @@ class NavInteraction {
         const global = this._global;
         const canvas = this._canvas;
         if (!global || !canvas) return;
-        if (eventName !== 'dblclick') return;
+        if (global.pointInteraction || eventName !== 'dblclick') return;
         if (!(event instanceof MouseEvent)) return;
         const { events, state } = global;
         // dblclick/double-tap in gaming controls does nothing, like click/tap
@@ -265,7 +320,7 @@ class NavInteraction {
 
     private _onMobileTap = () => {
         const global = this._global;
-        if (!global) return;
+        if (!global || global.pointInteraction) return;
         const { state, events } = global;
         if (this._suppressClick) {
             this._suppressClick = false;
@@ -292,6 +347,8 @@ class NavInteraction {
         canvas.addEventListener('pointerdown', this._onPointerDown);
         canvas.addEventListener('pointermove', this._onPointerMove);
         canvas.addEventListener('pointerup', this._onPointerUp);
+        canvas.addEventListener('pointercancel', this._onInteractionChanged);
+        events.on('pointInteraction:changed', this._onInteractionChanged);
 
         // double-click/tap fallback -> run to walk target or orbit focus
         events.on('inputEvent', this._onInputEvent);
@@ -310,9 +367,11 @@ class NavInteraction {
             this._canvas.removeEventListener('pointerdown', this._onPointerDown);
             this._canvas.removeEventListener('pointermove', this._onPointerMove);
             this._canvas.removeEventListener('pointerup', this._onPointerUp);
+            this._canvas.removeEventListener('pointercancel', this._onInteractionChanged);
         }
         if (this._global) {
             const { events } = this._global;
+            events.off('pointInteraction:changed', this._onInteractionChanged);
             events.off('inputEvent', this._onInputEvent);
             events.off('mobileTap', this._onMobileTap);
             events.off('cameraMode:changed', this._onCameraModeChanged);

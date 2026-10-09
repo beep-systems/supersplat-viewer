@@ -9,6 +9,16 @@ import type { CaptureResult } from './capture';
 import type { Localize } from './localization';
 import type { ViewerAssets, ViewerFlags } from './options';
 import type { Annotation, ExperienceSettings } from './settings';
+import type {
+    FrameOptions,
+    PointInteraction,
+    SurfaceHit,
+    VisibilityPoint,
+    MarkerOptions,
+    MarkerVisual,
+    MarkerConnectionOptions,
+    MarkerConnection
+} from './voluscape-types';
 
 type CameraMode = 'orbit' | 'anim' | 'fly' | 'walk';
 
@@ -143,7 +153,12 @@ type ViewerHandle = {
      * Frame the whole scene, switching to orbit mode. Requires `state.loaded` and throws
      * before readiness or after destruction. Starts a transition without waiting for it.
      */
-    frameScene(): void;
+    frameScene(options?: FrameOptions): void;
+    setPointInteraction(handler: PointInteraction | null, cursor?: string): void;
+    pickSurface(x: number, y: number): Promise<SurfaceHit | null>;
+    pickVisibility(points: VisibilityPoint[], radius: number): Promise<(number | null)[]>;
+    createMarkerVisual(options: MarkerOptions): MarkerVisual;
+    createMarkerConnection(options: MarkerConnectionOptions): MarkerConnection;
     /**
      * Reset the active camera: restore the entry spawn in fly/walk mode, or switch to orbit
      * and restore the authored initial view (scene framing if absent). Requires `state.loaded`
@@ -196,6 +211,8 @@ type ViewerHandle = {
 };
 
 type Global = {
+    pointInteraction?: PointInteraction | null;
+    pointCursor?: string;
     app: AppBase;
     settings: ExperienceSettings;
     config: Config;

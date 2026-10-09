@@ -1,3 +1,4 @@
+import { createSceneMarkerVisual, createSceneMarkerConnection } from './markers';
 import {
     Asset,
     Color,
@@ -461,9 +462,33 @@ const createViewer = async (options: CreateViewerOptions): Promise<ViewerHandle>
         state,
         events,
         annotations: global.settings.annotations,
+        // VoluScape marker bridge; navigation delegates clicks only while a handler is set.
+        setPointInteraction: (handler, cursor = 'crosshair') => {
+            global.pointInteraction = handler ?? null;
+            global.pointCursor = cursor;
+            events.fire('pointInteraction:changed');
+        },
+        pickSurface: async (x, y) => {
+            if (destroyed || !state.loaded) return null;
+            const hit = await viewer.picker?.pickSurface(x, y);
+            if (destroyed || !hit) return null;
+            return {
+                position: [hit.position.x, hit.position.y, hit.position.z],
+                normal: [hit.normal.x, hit.normal.y, hit.normal.z]
+            };
+        },
+        createMarkerVisual: (options) => createSceneMarkerVisual(app, options),
+        pickVisibility: async (points, radius) => {
+            if (destroyed || !state.loaded) return points.map((): number | null => null);
+            const result = await viewer.picker?.pickVisibility(points, radius);
+            return destroyed
+                ? points.map((): number | null => null)
+                : (result ?? points.map((): number | null => null));
+        },
+        createMarkerConnection: (options) => createSceneMarkerConnection(app, options),
         captureFrame: (captureOptions) => viewer.captureFrame(captureOptions),
         seek: (time) => viewer.seek(time),
-        frameScene: () => viewer.frameScene(),
+        frameScene: (options) => viewer.frameScene(options),
         resetCamera: () => viewer.resetCamera(),
         toggleWalk: () => viewer.toggleWalk(),
         selectAnnotation: (index) => viewer.selectAnnotation(index),
@@ -504,3 +529,14 @@ export type { CaptureResult } from './capture';
 export type { CreateViewerOptions, ViewerAssets, ViewerFlags } from './options';
 export type { CaptureOptions, ViewerHandle, ViewerState, XrMode } from './types';
 export { createViewer };
+export type {
+    Bounds,
+    FrameOptions,
+    SurfaceHit,
+    VisibilityPoint,
+    MarkerOptions,
+    MarkerVisual,
+    MarkerConnectionOptions,
+    MarkerConnection,
+    PointInteraction
+} from './voluscape-types';
