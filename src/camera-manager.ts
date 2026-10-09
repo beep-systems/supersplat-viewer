@@ -14,9 +14,11 @@ import { WalkController } from './cameras/walk-controller';
 import { WalkSource } from './cameras/walk-source';
 import type { Collision } from './collision';
 import { easeOut } from './core/math';
+import { framePose } from './framing';
 import { DEFAULT_CAMERA_FOV } from './schemas/defaults';
 import type { Annotation } from './settings';
 import type { CameraMode, Global } from './types';
+import type { FrameOptions } from './voluscape-types';
 
 const tmpCamera = new Camera();
 const tmpv = new Vec3();
@@ -67,10 +69,27 @@ const createCamera = (position: Vec3, target: Vec3, fov: number) => {
     return result;
 };
 
-const createFrameCamera = (bbox: BoundingBox, fov: number) => {
-    const sceneSize = bbox.halfExtents.length();
-    const distance = sceneSize / Math.sin((fov / 180) * Math.PI * 0.5);
-    return createCamera(new Vec3(2, 1, 2).normalize().mulScalar(distance).add(bbox.center), bbox.center, fov);
+const createFrameCamera = (
+    bbox: BoundingBox,
+    fov: number,
+    width: number,
+    height: number,
+    options: FrameOptions = {}
+) => {
+    const bounds = options.bounds ?? {
+        min: [
+            bbox.center.x - bbox.halfExtents.x,
+            bbox.center.y - bbox.halfExtents.y,
+            bbox.center.z - bbox.halfExtents.z
+        ],
+        max: [
+            bbox.center.x + bbox.halfExtents.x,
+            bbox.center.y + bbox.halfExtents.y,
+            bbox.center.z + bbox.halfExtents.z
+        ]
+    };
+    const pose = framePose(bounds, options.direction ?? [2, 1, 2], fov, width, height, options.padding ?? 1.1);
+    return pose ? createCamera(new Vec3(pose.position), new Vec3(pose.target), fov) : null;
 };
 
 class CameraManager {
@@ -99,14 +118,28 @@ class CameraManager {
     // holds the camera state
     camera = new Camera();
 
-    constructor(global: Global, bbox: BoundingBox, collision: Collision | null = null) {
+    constructor(
+        global: Global,
+        bbox: BoundingBox,
+        collision: Collision | null = null,
+        refreshBounds = () => {
+            /* No transformed bounds supplied by the host. */
+        }
+    ) {
         const { events, settings, state } = global;
 
         let walkAllowed = isWalkAllowed(bbox, collision);
 
         const camera0 = settings.cameras[0]?.initial;
         const defaultFov = camera0?.fov ?? DEFAULT_CAMERA_FOV;
-        const frameCamera = createFrameCamera(bbox, defaultFov);
+        const device = global.app.graphicsDevice;
+        let framingOptions: FrameOptions = {
+            direction: camera0 ? camera0.position.map((value, axis) => value - camera0.target[axis]) : [2, 1, 2]
+        };
+        if (Math.hypot(...framingOptions.direction) < 1e-8) framingOptions.direction = [2, 1, 2];
+        const frameCamera =
+            createFrameCamera(bbox, defaultFov, device.width, device.height, framingOptions) ??
+            createCamera(new Vec3(2, 1, 2), new Vec3(), defaultFov);
         const resetCamera = camera0
             ? createCamera(new Vec3(camera0.position), new Vec3(camera0.target), camera0.fov)
             : frameCamera;
@@ -267,14 +300,25 @@ class CameraManager {
         };
 
         // handle input events
-        events.on('inputEvent', (eventName) => {
+        events.on('inputEvent', (eventName: string, frameOptions?: FrameOptions) => {
             switch (eventName) {
-                case 'frame':
+                case 'frame': {
+                    refreshBounds();
+                    const { immediate = false, ...parameters } = frameOptions ?? {};
+                    framingOptions = { ...framingOptions, ...parameters };
+                    const framed = createFrameCamera(bbox, defaultFov, device.width, device.height, framingOptions);
+                    if (!framed) break;
                     events.fire('orbitTarget:clear');
                     state.cameraMode = 'orbit';
-                    controllers.orbit.goto(frameCamera);
-                    startTransition();
+                    if (immediate) {
+                        this.camera.copy(framed);
+                        this.snap();
+                    } else {
+                        controllers.orbit.goto(framed);
+                        startTransition();
+                    }
                     break;
+                }
                 case 'reset':
                     if (state.cameraMode === 'walk') {
                         walkSource.cancel();

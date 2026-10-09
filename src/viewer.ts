@@ -33,6 +33,7 @@ import type { Collision } from './collision';
 import { MeshCollision, VoxelCollision } from './collision';
 import { nearlyEquals } from './core/math';
 import { DebugPanel } from './debug';
+import { validBounds } from './framing';
 import { initFullscreen } from './fullscreen';
 import { InputController } from './input-controller';
 import { MeshDebugOverlay } from './mesh-debug-overlay';
@@ -43,6 +44,7 @@ import { FrameDepthPicker } from './picker-frame-depth';
 import { StochasticSplatRenderer } from './render/stochastic-splat-renderer';
 import type { ExperienceSettings, PostEffectSettings } from './settings';
 import type { CaptureOptions, Config, Global, XrMode } from './types';
+import type { FrameOptions } from './voluscape-types';
 import { VoxelDebugOverlay } from './voxel-debug-overlay';
 import { initXr } from './xr';
 
@@ -378,7 +380,28 @@ class Viewer {
             }
         });
 
+        const refreshSceneBounds = () => {
+            // Clipping uses full geometry, not the trimmed framing bounds.
+            let first = true;
+            const transformed = new BoundingBox();
+            for (const component of app.root.findComponents('gsplat') as GSplatComponent[]) {
+                const local = component.customAabb;
+                if (!local) continue;
+                transformed.setFromTransformedAabb(local, component.entity.getWorldTransform());
+                const min = transformed.getMin();
+                const max = transformed.getMax();
+                if (!validBounds({ min: [min.x, min.y, min.z], max: [max.x, max.y, max.z] })) continue;
+                if (first) sceneBound.copy(transformed);
+                else sceneBound.add(transformed);
+                first = false;
+            }
+            if (first) {
+                sceneBound.center.set(0, 0, 0);
+                sceneBound.halfExtents.set(0, 0, 0);
+            }
+        };
         const applyCamera = (camera: Camera) => {
+            refreshSceneBounds();
             const cameraEntity = global.camera;
 
             cameraEntity.setPosition(camera.position);
@@ -572,10 +595,7 @@ class Viewer {
             const gsplatComponent = results[0].gsplat as GSplatComponent;
 
             // get scene bounding box
-            const gsplatBbox = gsplatComponent.customAabb;
-            if (gsplatBbox) {
-                sceneBound.setFromTransformedAabb(gsplatBbox, results[0].getWorldTransform());
-            }
+            refreshSceneBounds();
 
             // the stochastic renderer leaves its frame's depth behind, so no pick pass is needed
             this.picker = this.splatRenderer
@@ -585,7 +605,7 @@ class Viewer {
             events.fire('picker:ready', this.picker);
             this.inputController = new InputController(global, this.picker);
 
-            this.cameraManager = new CameraManager(global, sceneBound);
+            this.cameraManager = new CameraManager(global, sceneBound, null, refreshSceneBounds);
             applyCamera(this.cameraManager.camera);
 
             if (config.ui) {
@@ -743,9 +763,9 @@ class Viewer {
         }
     }
 
-    frameScene(): void {
+    frameScene(options?: FrameOptions): void {
         this.requireLoaded('frameScene');
-        this.global.events.fire('inputEvent', 'frame');
+        this.global.events.fire('inputEvent', 'frame', options);
     }
 
     resetCamera(): void {
