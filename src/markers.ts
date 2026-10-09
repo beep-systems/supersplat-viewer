@@ -44,7 +44,7 @@ const createSceneMarkerVisual = (app: AppBase, { position, normal, height, color
         app.renderNextFrame = true;
     };
     const material = createMarkerMaterial(color);
-    const shape = (type: string, y: number, sx: number, sy: number, sz: number) => {
+    const shape = (type: 'cone' | 'sphere', y: number, sx: number, sy: number, sz: number) => {
         const entity = new Entity(`Marker-${type}`, app);
         root.addChild(entity);
         entity.addComponent('render', { type, material });
